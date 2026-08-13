@@ -199,6 +199,14 @@ You can log in using the pre-seeded local development account:
 
 _(Or click **Sign Up** on `http://localhost:7400/signup` with any custom email/password — local dev auto-confirms email signups.)_
 
+### 🔒 Port Mapping & Network Isolation
+
+To avoid conflicts with standard local development tools (e.g. local PostgreSQL servers, Node/Grafana apps on 3000, or FastAPI/Django on 8000), host ports are isolated and re-mapped:
+
+- **CADAM Web UI (`APP_PORT`)**: `http://localhost:7400`
+- **Supabase Gateway (`KONG_HTTP_PORT`)**: `http://localhost:7401`
+- **Internal Services**: PostgreSQL (`5432`), Auth (`9999`), PostgREST, and Storage remain **unexposed on the host machine** by default to prevent port conflicts. All inter-container traffic flows securely over Docker's isolated internal network.
+
 ### 🛠️ Managing the Stack
 
 - **Stop containers:** `./manage.sh down` (preserves DB/storage data in named volumes).
