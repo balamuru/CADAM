@@ -176,6 +176,53 @@ npx supabase functions serve --no-verify-jwt
 npm run dev
 ```
 
+## 🐳 Docker
+
+The fastest way to a fully working local stack — CADAM plus a complete local
+Supabase backend (Postgres, Auth, PostgREST, Realtime, Storage) — with no
+Supabase CLI and no `npm install` on the host:
+
+```bash
+cp .env.docker.template .env.docker
+# then fill in a key for whichever provider you plan to chat with, e.g.
+# just GOOGLE_API_KEY if you'll pick a Gemini model in the app's model
+# picker. None of the AI provider keys are hard requirements to boot the
+# stack — a request just fails if the key for the model you picked is
+# missing. The one exception: "creative" (mesh) conversations always run
+# on Claude, so that mode needs ANTHROPIC_API_KEY specifically. Conversation
+# titles/suggestions also use Claude but silently skip (no error) if
+# ANTHROPIC_API_KEY is unset.
+
+docker compose --env-file .env.docker up --build
+```
+
+Once every service reports healthy, the app is at **http://localhost:3000**
+(configurable via `APP_PORT` in `.env.docker`).
+
+**Data persistence:** Postgres and Storage data live in named Docker volumes.
+`docker compose down` keeps them — your conversations, uploads, and users
+survive a restart. Only `docker compose down -v` wipes them.
+
+**Studio (optional DB browser):**
+
+```bash
+docker compose --env-file .env.docker --profile studio up
+```
+
+Opens at `http://localhost:54323` (configurable via `STUDIO_PORT`).
+
+The `db`/`auth`/`rest`/`realtime`/`storage`/`kong` services are adapted from
+[Supabase's own self-hosting `docker-compose.yml`](https://supabase.com/docs/guides/self-hosting/docker),
+trimmed to what CADAM actually uses — no Edge Functions, no connection pooler.
+`.env.docker.template` ships with Supabase's well-known local-dev demo JWT
+secret/keys; regenerate them (see the comments in the template) before
+exposing this stack beyond `localhost`.
+
+This is a separate path from the `supabase start` + `npm run dev` workflow
+below — use whichever fits: Docker for a single command that stands up
+everything, or `supabase start` + `npm run dev` for the fastest edit/reload
+loop on the app code itself.
+
 ## 📋 Prerequisites
 
 - Node.js ^20.19.0 or >=22.12.0, with npm 10+
