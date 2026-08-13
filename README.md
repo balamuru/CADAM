@@ -203,6 +203,8 @@ Once every service reports healthy, the app is at **http://localhost:3000**
 `docker compose down` keeps them — your conversations, uploads, and users
 survive a restart. Only `docker compose down -v` wipes them.
 
+**Hardware & GPU Requirements:** No host GPU or GPU passthrough (`nvidia-docker` / CUDA) is needed. OpenSCAD CAD compilation runs in client browser WebAssembly (`openscad-wasm`), 3D viewport rendering uses browser WebGL, and AI inference is offloaded via cloud APIs.
+
 **Studio (optional DB browser):**
 
 ```bash
