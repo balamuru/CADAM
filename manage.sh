@@ -31,7 +31,11 @@ case "${1:-}" in
     "${COMPOSE[@]}" up --build -d
     ;;
   down)
-    "${COMPOSE[@]}" down
+    if [ -f "$ENV_FILE" ]; then
+      "${COMPOSE[@]}" down
+    else
+      docker compose down
+    fi
     ;;
   *)
     usage
