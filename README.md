@@ -176,36 +176,36 @@ npx supabase functions serve --no-verify-jwt
 npm run dev
 ```
 
-## 🐳 Docker
+## 🐳 Docker (`./manage.sh`)
 
-The fastest way to a fully working local stack — CADAM plus a complete local
-Supabase backend (Postgres, Auth, PostgREST, Realtime, Storage) — with no
-Supabase CLI and no `npm install` on the host:
+The fastest way to a fully working local stack — CADAM plus a complete local Supabase backend (Postgres, Auth, PostgREST, Realtime, Storage) — with no Supabase CLI and no `npm install` on the host:
 
 ```bash
+# 1. Copy the environment template and set your AI provider key (e.g. GOOGLE_API_KEY)
 cp .env.docker.template .env.docker
-# then fill in a key for whichever provider you plan to chat with, e.g.
-# just GOOGLE_API_KEY if you'll pick a Gemini model in the app's model
-# picker. None of the AI provider keys are hard requirements to boot the
-# stack — a request just fails if the key for the model you picked is
-# missing. The one exception: "creative" (mesh) conversations always run
-# on Claude, so that mode needs ANTHROPIC_API_KEY specifically. Conversation
-# titles/suggestions also use Claude but silently skip (no error) if
-# ANTHROPIC_API_KEY is unset.
 
-docker compose --env-file .env.docker up --build
+# 2. Build and start all containers using the management script
+./manage.sh up
 ```
 
-Once every service reports healthy, the app is at **http://localhost:3000**
-(configurable via `APP_PORT` in `.env.docker`).
+Once every service reports healthy, the app opens at **[http://localhost:7400](http://localhost:7400)** (configurable via `APP_PORT` in `.env.docker`).
 
-**Data persistence:** Postgres and Storage data live in named Docker volumes.
-`docker compose down` keeps them — your conversations, uploads, and users
-survive a restart. Only `docker compose down -v` wipes them.
+### 🔐 Local Authentication
 
-**Hardware & GPU Requirements:** No host GPU or GPU passthrough (`nvidia-docker` / CUDA) is needed. OpenSCAD CAD compilation runs in client browser WebAssembly (`openscad-wasm`), 3D viewport rendering uses browser WebGL, and AI inference is offloaded via cloud APIs.
+You can log in using the pre-seeded local development account:
 
-**Studio (optional DB browser):**
+- **Email:** `test@adamcad.com`
+- **Password:** `password`
+
+_(Or click **Sign Up** on `http://localhost:7400/signup` with any custom email/password — local dev auto-confirms email signups.)_
+
+### 🛠️ Managing the Stack
+
+- **Stop containers:** `./manage.sh down` (preserves DB/storage data in named volumes).
+- **Data Persistence:** Postgres and Storage data live in named Docker volumes (`db-data`, `storage-data`). Only `docker compose down -v` wipes them.
+- **Hardware & GPU Requirements:** No host GPU or GPU passthrough (`nvidia-docker` / CUDA) is required. OpenSCAD compilation runs in client browser WebAssembly (`openscad-wasm`), 3D viewport rendering uses browser WebGL, and AI inference is offloaded via cloud APIs.
+
+### 📊 Studio (Optional DB Browser)
 
 ```bash
 docker compose --env-file .env.docker --profile studio up
