@@ -1,0 +1,451 @@
+# Self-contained local stack: CADAM + a full local Supabase backend (Postgres,
+# Auth, PostgREST, Realtime, Storage), no Supabase CLI required.
+#
+#   docker compose --env-file .env.docker up --build
+#
+# The db/auth/rest/realtime/storage/kong services below are adapted from
+# Supabase's own published self-hosting docker-compose.yml (tag v1.26.08),
+# trimmed to only what CADAM uses: no Edge Functions (this repo has none),
+# no Supavisor pooler (single app instance talks to `db` directly), no
+# analytics/logs stack. `imgproxy` stays even though CADAM doesn't use image
+# transforms — Storage's healthcheck depends on it being reachable.
+name: cadam
+
+services:
+  db:
+    container_name: cadam-db
+    image: supabase/postgres:17.6.1.136
+    restart: unless-stopped
+    volumes:
+      - ./docker/db/init/supabase/webhooks.sql:/docker-entrypoint-initdb.d/init-scripts/98-webhooks.sql:Z
+      - ./docker/db/init/supabase/roles.sql:/docker-entrypoint-initdb.d/init-scripts/99-roles.sql:Z
+      - ./docker/db/init/supabase/jwt.sql:/docker-entrypoint-initdb.d/init-scripts/99-jwt.sql:Z
+      - ./docker/db/init/supabase/_supabase.sql:/docker-entrypoint-initdb.d/migrations/97-_supabase.sql:Z
+      - ./docker/db/init/supabase/realtime.sql:/docker-entrypoint-initdb.d/migrations/99-realtime.sql:Z
+      - ./docker/db/init/supabase/logs.sql:/docker-entrypoint-initdb.d/migrations/99-logs.sql:Z
+      - ./docker/db/init/supabase/pooler.sql:/docker-entrypoint-initdb.d/migrations/99-pooler.sql:Z
+      # CADAM's own migrations do NOT go here. storage.objects (used by the
+      # storage RLS policies in these migrations) isn't created by Postgres's
+      # own initdb scripts — it's created by the `storage` container's own
+      # migration runner, which only starts once `db` is already healthy. So
+      # CADAM's migrations run afterward, via the `migrate` service below.
+      # Named volume: survives `docker compose down`, wiped only by `down -v`.
+      # These init scripts only run the FIRST time this volume is empty —
+      # restarts never re-run migrations or touch existing data.
+      - db-data:/var/lib/postgresql/data
+      - db-config:/etc/postgresql-custom
+    # Host port mapping is unexposed by default to prevent conflicts with local Postgres.
+    # Uncomment below only if you need external DB GUI access (e.g., TablePlus):
+    # ports:
+    #   - '${POSTGRES_PORT:-5432}:5432'
+    healthcheck:
+      test: ['CMD', 'pg_isready', '-U', 'postgres', '-h', 'localhost']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    environment:
+      POSTGRES_HOST: /var/run/postgresql
+      PGPORT: 5432
+      POSTGRES_PORT: 5432
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      PGDATABASE: ${POSTGRES_DB:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-postgres}
+      JWT_SECRET: ${JWT_SECRET}
+      JWT_EXP: ${JWT_EXPIRY:-3600}
+    command:
+      [
+        'postgres',
+        '-c',
+        'config_file=/etc/postgresql/postgresql.conf',
+        '-c',
+        'log_min_messages=fatal',
+      ]
+
+  auth:
+    container_name: cadam-auth
+    image: supabase/gotrue:v2.189.0
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          'CMD',
+          'wget',
+          '--no-verbose',
+          '--tries=1',
+          '--spider',
+          'http://localhost:9999/health',
+        ]
+      timeout: 5s
+      interval: 5s
+      retries: 3
+    environment:
+      GOTRUE_API_HOST: 0.0.0.0
+      GOTRUE_API_PORT: 9999
+      API_EXTERNAL_URL: ${API_EXTERNAL_URL:-http://localhost:7401/auth/v1}
+
+      GOTRUE_DB_DRIVER: postgres
+      GOTRUE_DB_DATABASE_URL: postgres://supabase_auth_admin:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-postgres}
+
+      GOTRUE_SITE_URL: ${SITE_URL:-http://localhost:7400}
+      GOTRUE_URI_ALLOW_LIST: ${ADDITIONAL_REDIRECT_URLS:-}
+      GOTRUE_DISABLE_SIGNUP: ${DISABLE_SIGNUP:-false}
+
+      GOTRUE_JWT_ADMIN_ROLES: service_role
+      GOTRUE_JWT_AUD: authenticated
+      GOTRUE_JWT_DEFAULT_GROUP_NAME: authenticated
+      GOTRUE_JWT_EXP: ${JWT_EXPIRY:-3600}
+      GOTRUE_JWT_SECRET: ${JWT_SECRET}
+      GOTRUE_JWT_ISSUER: ${API_EXTERNAL_URL:-http://localhost:7401/auth/v1}
+
+      GOTRUE_EXTERNAL_EMAIL_ENABLED: ${ENABLE_EMAIL_SIGNUP:-true}
+      GOTRUE_EXTERNAL_ANONYMOUS_USERS_ENABLED: ${ENABLE_ANONYMOUS_USERS:-false}
+      GOTRUE_MAILER_AUTOCONFIRM: ${ENABLE_EMAIL_AUTOCONFIRM:-true}
+
+      GOTRUE_SMTP_ADMIN_EMAIL: ${SMTP_ADMIN_EMAIL:-admin@example.com}
+      GOTRUE_SMTP_HOST: ${SMTP_HOST:-}
+      GOTRUE_SMTP_PORT: ${SMTP_PORT:-2500}
+      GOTRUE_SMTP_USER: ${SMTP_USER:-}
+      GOTRUE_SMTP_PASS: ${SMTP_PASS:-}
+      GOTRUE_SMTP_SENDER_NAME: ${SMTP_SENDER_NAME:-}
+      GOTRUE_MAILER_URLPATHS_INVITE: /auth/v1/verify
+      GOTRUE_MAILER_URLPATHS_CONFIRMATION: /auth/v1/verify
+      GOTRUE_MAILER_URLPATHS_RECOVERY: /auth/v1/verify
+      GOTRUE_MAILER_URLPATHS_EMAIL_CHANGE: /auth/v1/verify
+
+      GOTRUE_EXTERNAL_PHONE_ENABLED: 'false'
+      GOTRUE_SMS_AUTOCONFIRM: 'false'
+
+      # Uncomment (and set GOOGLE_CLIENT_ID / GOOGLE_SECRET in .env.docker) to
+      # enable Google sign-in, matching supabase/config.toml's
+      # [auth.external.google] block.
+      # GOTRUE_EXTERNAL_GOOGLE_ENABLED: 'true'
+      # GOTRUE_EXTERNAL_GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID}
+      # GOTRUE_EXTERNAL_GOOGLE_SECRET: ${GOOGLE_SECRET}
+      # GOTRUE_EXTERNAL_GOOGLE_REDIRECT_URI: ${API_EXTERNAL_URL}/callback
+
+  rest:
+    container_name: cadam-rest
+    image: postgrest/postgrest:v14.12
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ['CMD', 'postgrest', '--ready']
+      interval: 5s
+      timeout: 5s
+      retries: 3
+    environment:
+      PGRST_DB_URI: postgres://authenticator:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-postgres}
+      PGRST_DB_SCHEMAS: ${PGRST_DB_SCHEMAS:-public,graphql_public}
+      PGRST_DB_MAX_ROWS: ${PGRST_DB_MAX_ROWS:-1000}
+      PGRST_DB_EXTRA_SEARCH_PATH: ${PGRST_DB_EXTRA_SEARCH_PATH:-public}
+      PGRST_DB_ANON_ROLE: anon
+      PGRST_ADMIN_SERVER_PORT: 3001
+      PGRST_ADMIN_SERVER_HOST: localhost
+      PGRST_JWT_SECRET: ${JWT_SECRET}
+      PGRST_DB_USE_LEGACY_GUCS: 'false'
+      PGRST_APP_SETTINGS_JWT_SECRET: ${JWT_SECRET}
+      PGRST_APP_SETTINGS_JWT_EXP: ${JWT_EXPIRY:-3600}
+    command: ['postgrest']
+
+  realtime:
+    # This container name looks inconsistent but is correct: Realtime
+    # constructs its tenant id by parsing the subdomain.
+    container_name: realtime-dev.cadam-realtime
+    image: supabase/realtime:v2.102.3
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          'CMD-SHELL',
+          'curl -sSfL --head -o /dev/null -H "Authorization: Bearer ${ANON_KEY}" http://localhost:4000/api/tenants/realtime-dev/health',
+        ]
+      timeout: 5s
+      interval: 30s
+      retries: 3
+      start_period: 10s
+    environment:
+      PORT: 4000
+      DB_HOST: db
+      DB_PORT: 5432
+      DB_USER: supabase_admin
+      DB_PASSWORD: ${POSTGRES_PASSWORD}
+      DB_NAME: ${POSTGRES_DB:-postgres}
+      DB_AFTER_CONNECT_QUERY: 'SET search_path TO _realtime'
+      DB_ENC_KEY: ${REALTIME_DB_ENC_KEY:-supabaserealtime}
+      API_JWT_SECRET: ${JWT_SECRET}
+      SECRET_KEY_BASE: ${SECRET_KEY_BASE}
+      METRICS_JWT_SECRET: ${JWT_SECRET}
+      ERL_AFLAGS: -proto_dist inet_tcp
+      DNS_NODES: "''"
+      RLIMIT_NOFILE: '10000'
+      APP_NAME: realtime
+      SEED_SELF_HOST: 'true'
+      RUN_JANITOR: 'true'
+      DISABLE_HEALTHCHECK_LOGGING: 'true'
+
+  imgproxy:
+    container_name: cadam-imgproxy
+    image: darthsim/imgproxy:v3.30.1
+    restart: unless-stopped
+    volumes:
+      - storage-data:/var/lib/storage
+    healthcheck:
+      test: ['CMD', 'imgproxy', 'health']
+      timeout: 5s
+      interval: 5s
+      retries: 3
+    environment:
+      IMGPROXY_BIND: ':5001'
+      IMGPROXY_LOCAL_FILESYSTEM_ROOT: /
+      IMGPROXY_USE_ETAG: 'true'
+      IMGPROXY_MAX_SRC_RESOLUTION: 16.8
+
+  storage:
+    container_name: cadam-storage
+    image: supabase/storage-api:v1.60.4
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+      rest:
+        condition: service_started
+      imgproxy:
+        condition: service_started
+    healthcheck:
+      test:
+        [
+          'CMD',
+          'wget',
+          '--no-verbose',
+          '--tries=1',
+          '--spider',
+          'http://storage:5000/status',
+        ]
+      timeout: 5s
+      interval: 5s
+      retries: 3
+      start_period: 10s
+    environment:
+      ANON_KEY: ${ANON_KEY}
+      SERVICE_KEY: ${SERVICE_ROLE_KEY}
+      POSTGREST_URL: http://rest:3000
+      AUTH_JWT_SECRET: ${JWT_SECRET}
+      DATABASE_URL: postgres://supabase_storage_admin:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-postgres}
+      STORAGE_PUBLIC_URL: ${SUPABASE_PUBLIC_URL:-http://localhost:7401}
+      REQUEST_ALLOW_X_FORWARDED_PATH: 'true'
+      FILE_SIZE_LIMIT: 52428800
+      STORAGE_BACKEND: file
+      GLOBAL_S3_BUCKET: stub
+      FILE_STORAGE_BACKEND_PATH: /var/lib/storage
+      TENANT_ID: stub
+      REGION: stub
+      ENABLE_IMAGE_TRANSFORMATION: 'true'
+      IMGPROXY_URL: http://imgproxy:5001
+    volumes:
+      # Named volume: survives `docker compose down`; wiped only by `down -v`.
+      - storage-data:/var/lib/storage
+
+  # One-shot: applies CADAM's own schema (supabase/migrations, then
+  # supabase/seed.sql) plus the private storage buckets, then exits. Runs
+  # after `storage` is healthy — see the note on `db` above for why this
+  # can't happen during Postgres's own initdb phase. This container runs on
+  # EVERY `docker compose up`, including restarts against an already-migrated
+  # volume — the migrations/seed.sql are plain CREATE TABLE / INSERT (not
+  # idempotent), so re-applying them blindly would fail on a second run.
+  # `public._cadam_migrations` tracks what's already been applied and skips
+  # it, the same way a real migration runner would.
+  migrate:
+    container_name: cadam-migrate
+    image: postgres:17-alpine
+    restart: 'no'
+    depends_on:
+      db:
+        condition: service_healthy
+      storage:
+        condition: service_healthy
+    volumes:
+      - ./supabase/migrations:/migrations:ro
+      - ./supabase/seed.sql:/seed.sql:ro
+      - ./docker/db/init/storage-buckets.sql:/storage-buckets.sql:ro
+    environment:
+      PGHOST: db
+      PGPORT: 5432
+      PGUSER: postgres
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+      PGDATABASE: ${POSTGRES_DB:-postgres}
+    entrypoint: ['/bin/sh', '-c']
+    command:
+      - |
+        set -e
+        psql -v ON_ERROR_STOP=1 -c "create table if not exists public._cadam_migrations (name text primary key, applied_at timestamptz not null default now());"
+
+        apply_once() {
+          name="$$1"; file="$$2"
+          already=$$(psql -tA -c "select 1 from public._cadam_migrations where name = '$$name';")
+          if [ "$$already" = "1" ]; then
+            echo "Skipping $$name (already applied)"
+            return
+          fi
+          echo "Applying $$name"
+          psql -v ON_ERROR_STOP=1 -f "$$file"
+          psql -v ON_ERROR_STOP=1 -c "insert into public._cadam_migrations (name) values ('$$name');"
+        }
+
+        for f in /migrations/*.sql; do
+          apply_once "$$(basename "$$f")" "$$f"
+        done
+        apply_once "seed.sql" "/seed.sql"
+
+        echo "Creating storage buckets"
+        psql -v ON_ERROR_STOP=1 -f /storage-buckets.sql
+
+  kong:
+    container_name: cadam-kong
+    image: kong/kong:3.9.3
+    restart: unless-stopped
+    depends_on:
+      auth:
+        condition: service_healthy
+      rest:
+        condition: service_started
+      storage:
+        condition: service_healthy
+    healthcheck:
+      test: ['CMD', 'kong', 'health']
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    ports:
+      - '${KONG_HTTP_PORT:-7401}:8000/tcp'
+    volumes:
+      - ./docker/kong/kong.yml:/home/kong/temp.yml:ro,z
+      - ./docker/kong/kong-entrypoint.sh:/home/kong/kong-entrypoint.sh:ro,z
+    environment:
+      KONG_DATABASE: 'off'
+      KONG_DECLARATIVE_CONFIG: /usr/local/kong/kong.yml
+      KONG_ROUTER_FLAVOR: expressions
+      KONG_DNS_ORDER: LAST,A,CNAME
+      KONG_DNS_NOT_FOUND_TTL: 1
+      KONG_DNS_VALID_TTL: 5
+      KONG_PLUGINS: request-transformer,cors,key-auth,acl,basic-auth,request-termination,ip-restriction,post-function
+      KONG_NGINX_PROXY_PROXY_BUFFER_SIZE: 160k
+      KONG_NGINX_PROXY_PROXY_BUFFERS: 64 160k
+      KONG_PROXY_ACCESS_LOG: /dev/stdout combined
+      SUPABASE_ANON_KEY: ${ANON_KEY}
+      SUPABASE_SERVICE_KEY: ${SERVICE_ROLE_KEY}
+      # Left unset on purpose: this stack only uses the legacy HS256
+      # ANON_KEY/SERVICE_ROLE_KEY JWTs above. kong-entrypoint.sh falls back to
+      # legacy-only routing when these opaque keys are empty.
+      SUPABASE_PUBLISHABLE_KEY: ''
+      SUPABASE_SECRET_KEY: ''
+      ANON_KEY_ASYMMETRIC: ''
+      SERVICE_ROLE_KEY_ASYMMETRIC: ''
+      DASHBOARD_USERNAME: ${DASHBOARD_USERNAME:-supabase}
+      DASHBOARD_PASSWORD: ${DASHBOARD_PASSWORD:-supabase}
+    entrypoint: ['/bin/sh', '/home/kong/kong-entrypoint.sh']
+
+  app:
+    container_name: cadam-app
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        VITE_SUPABASE_URL: ${VITE_SUPABASE_URL:-http://localhost:7401}
+        VITE_SUPABASE_ANON_KEY: ${ANON_KEY}
+        VITE_SSO_PROVIDER: ${VITE_SSO_PROVIDER:-}
+        VITE_ACCOUNT_URL: ${VITE_ACCOUNT_URL:-}
+        VITE_POSTHOG_PROJECT_KEY: ${VITE_POSTHOG_PROJECT_KEY:-}
+        VITE_POSTHOG_HOST: ${VITE_POSTHOG_HOST:-}
+        VITE_SENTRY_ENVIRONMENT: ${VITE_SENTRY_ENVIRONMENT:-local}
+        VITE_SENTRY_DSN: ${VITE_SENTRY_DSN:-}
+        VITE_SENTRY_TRACES_SAMPLE_RATE: ${VITE_SENTRY_TRACES_SAMPLE_RATE:-}
+    restart: unless-stopped
+    depends_on:
+      kong:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    ports:
+      - '${APP_PORT:-7400}:3000'
+    environment:
+      # Server-side Supabase client (src/server/supabaseClient.ts) reads
+      # these from process.env — separate from the VITE_* build args above,
+      # which only inline into the browser bundle. Inside Docker network,
+      # Kong is reachable at http://kong:8000.
+      VITE_SUPABASE_URL: ${SUPABASE_INTERNAL_URL:-http://kong:8000}
+      VITE_SUPABASE_ANON_KEY: ${ANON_KEY}
+      SUPABASE_SERVICE_ROLE_KEY: ${SERVICE_ROLE_KEY}
+
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
+      FAL_KEY: ${FAL_KEY:-}
+      BILLING_SERVICE_URL: ${BILLING_SERVICE_URL:-}
+      BILLING_SERVICE_KEY: ${BILLING_SERVICE_KEY:-}
+      ENVIRONMENT: ${ENVIRONMENT:-local}
+      ADAM_URL: ${ADAM_URL:-}
+      WEBHOOK_BASE_URL: ${WEBHOOK_BASE_URL:-}
+      NGROK_URL: ${NGROK_URL:-}
+      ACCOUNT_PURGE_SECRET: ${ACCOUNT_PURGE_SECRET:-}
+
+  # Optional local DB browser: `docker compose --profile studio up`
+  meta:
+    container_name: cadam-meta
+    image: supabase/postgres-meta:v0.96.6
+    restart: unless-stopped
+    profiles: [studio]
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      PG_META_PORT: 8080
+      PG_META_DB_HOST: db
+      PG_META_DB_PORT: 5432
+      PG_META_DB_NAME: ${POSTGRES_DB:-postgres}
+      PG_META_DB_USER: postgres
+      PG_META_DB_PASSWORD: ${POSTGRES_PASSWORD}
+      CRYPTO_KEY: ${PG_META_CRYPTO_KEY}
+
+  studio:
+    container_name: cadam-studio
+    image: supabase/studio:2026.08.03-sha-022b374
+    restart: unless-stopped
+    profiles: [studio]
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - '${STUDIO_PORT:-54323}:3000'
+    environment:
+      HOSTNAME: '0.0.0.0'
+      STUDIO_PG_META_URL: http://meta:8080
+      POSTGRES_PORT: 5432
+      POSTGRES_HOST: db
+      POSTGRES_DB: ${POSTGRES_DB:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_USER_READ_WRITE: postgres
+      PG_META_CRYPTO_KEY: ${PG_META_CRYPTO_KEY}
+      PGRST_DB_SCHEMAS: ${PGRST_DB_SCHEMAS:-public,graphql_public}
+      DEFAULT_ORGANIZATION_NAME: CADAM
+      DEFAULT_PROJECT_NAME: CADAM
+      SUPABASE_URL: http://kong:8000
+      SUPABASE_PUBLIC_URL: ${SUPABASE_PUBLIC_URL:-http://localhost:8000}
+      SUPABASE_ANON_KEY: ${ANON_KEY}
+      SUPABASE_SERVICE_KEY: ${SERVICE_ROLE_KEY}
+      AUTH_JWT_SECRET: ${JWT_SECRET}
+
+volumes:
+  # `docker compose down` keeps these. Only `docker compose down -v` wipes them.
+  db-data:
+  db-config:
+  storage-data:

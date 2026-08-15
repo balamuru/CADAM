@@ -176,6 +176,63 @@ npx supabase functions serve --no-verify-jwt
 npm run dev
 ```
 
+## 🐳 Docker (`./manage.sh`)
+
+The fastest way to a fully working local stack — CADAM plus a complete local Supabase backend (Postgres, Auth, PostgREST, Realtime, Storage) — with no Supabase CLI and no `npm install` on the host:
+
+```bash
+# 1. Copy the environment template and set your AI provider key (e.g. GOOGLE_API_KEY)
+cp .env.docker.template .env.docker
+
+# 2. Build and start all containers using the management script
+./manage.sh up
+```
+
+Once every service reports healthy, the app opens at **[http://localhost:7400](http://localhost:7400)** (configurable via `APP_PORT` in `.env.docker`).
+
+### 🔐 Local Authentication
+
+You can log in using the pre-seeded local development account:
+
+- **Email:** `test@adamcad.com`
+- **Password:** `password`
+
+_(Or click **Sign Up** on `http://localhost:7400/signup` with any custom email/password — local dev auto-confirms email signups.)_
+
+### 🔒 Port Mapping & Network Isolation
+
+To avoid conflicts with standard local development tools (e.g. local PostgreSQL servers, Node/Grafana apps on 3000, or FastAPI/Django on 8000), host ports are isolated and re-mapped:
+
+- **CADAM Web UI (`APP_PORT`)**: `http://localhost:7400`
+- **Supabase Gateway (`KONG_HTTP_PORT`)**: `http://localhost:7401`
+- **Internal Services**: PostgreSQL (`5432`), Auth (`9999`), PostgREST, and Storage remain **unexposed on the host machine** by default to prevent port conflicts. All inter-container traffic flows securely over Docker's isolated internal network.
+
+### 🛠️ Managing the Stack
+
+- **Stop containers:** `./manage.sh down` (preserves DB/storage data in named volumes).
+- **Data Persistence:** Postgres and Storage data live in named Docker volumes (`db-data`, `storage-data`). Only `docker compose down -v` wipes them.
+- **Hardware & GPU Requirements:** No host GPU or GPU passthrough (`nvidia-docker` / CUDA) is required. OpenSCAD compilation runs in client browser WebAssembly (`openscad-wasm`), 3D viewport rendering uses browser WebGL, and AI inference is offloaded via cloud APIs.
+
+### 📊 Studio (Optional DB Browser)
+
+```bash
+docker compose --env-file .env.docker --profile studio up
+```
+
+Opens at `http://localhost:54323` (configurable via `STUDIO_PORT`).
+
+The `db`/`auth`/`rest`/`realtime`/`storage`/`kong` services are adapted from
+[Supabase's own self-hosting `docker-compose.yml`](https://supabase.com/docs/guides/self-hosting/docker),
+trimmed to what CADAM actually uses — no Edge Functions, no connection pooler.
+`.env.docker.template` ships with Supabase's well-known local-dev demo JWT
+secret/keys; regenerate them (see the comments in the template) before
+exposing this stack beyond `localhost`.
+
+This is a separate path from the `supabase start` + `npm run dev` workflow
+below — use whichever fits: Docker for a single command that stands up
+everything, or `supabase start` + `npm run dev` for the fastest edit/reload
+loop on the app code itself.
+
 ## 📋 Prerequisites
 
 - Node.js ^20.19.0 or >=22.12.0, with npm 10+
